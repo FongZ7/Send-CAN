@@ -54,9 +54,10 @@ void loop() {
       lastSendTime = millis();
 
       values[1] = emer;
-      values[2] = d_u;
-      values[3] = l_r;
-      values[4] = f_s;
+      values[2] = start;
+      values[3] = d_u;
+      values[4] = l_r;
+      values[5] = f_s;
 
       convertToHex(hexValue, values, 8);
 
