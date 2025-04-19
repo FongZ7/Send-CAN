@@ -9,6 +9,15 @@
 #define SW_JOYSTICK_CAN_ID 0x123      // ID ที่ใช้สั่งบันทึก/เล่นซ้ำ
 #define INDICATOR_CAN_ID 0x121 
 #define REMOTE_CAN_ID 0x180
+#define JOYSTICK_CALL 0x122
+#define INDICATOR_CALL 0x069
+
+#define Teach_led 0
+#define Valve_led 1
+#define Remote_led 2
+#define Spare1_led 3
+#define Spare2_led 4
+#define Deploy_led 5
 
 
 #define LED_Status_Can_Remote PA2
@@ -310,6 +319,18 @@ void Stow() {
     } 
   }
 
+void callbackCAN(uint16_t board, uint8_t byte, uint8_t data) {
+    if (byte >= 8) return; // ป้องกัน buffer overflow
+  
+    memset(CAN_TX_msg.buf, 0, sizeof(CAN_TX_msg.buf)); // Clear buffer
+  
+    CAN_TX_msg.id = board;
+    CAN_TX_msg.len = 8;
+    CAN_TX_msg.buf[byte] = data;
+  
+    Can.write(CAN_TX_msg);
+  }
+
 
 void loop()
 {
@@ -500,7 +521,6 @@ void loop()
          deployjoystick = true;  // เรียกฟังก์ชัน Deploy
 
         } else if (byteJT5 == 0) {
-        //  stowjoystick = true;  // เรียกฟังก์ชัน Stow
          stowjoystick = true;  // เรียกฟังก์ชัน Deploy
         }
       }
@@ -607,6 +627,7 @@ void loop()
 
 
     if(Status_CAN_JOYSTICK && replaying){                             //  CAN Tansmitter  JOYSTICK callback
+      
       CAN_TX_msg.id = (0x122);
       CAN_TX_msg.len = 8;
       CAN_TX_msg.buf[0] =  1;   // Teach led
