@@ -9,15 +9,6 @@
 #define SW_JOYSTICK_CAN_ID 0x123      // ID ที่ใช้สั่งบันทึก/เล่นซ้ำ
 #define INDICATOR_CAN_ID 0x121 
 #define REMOTE_CAN_ID 0x180
-#define JOYSTICK_CALL 0x122
-#define INDICATOR_CALL 0x069
-
-#define Teach_led 0
-#define Valve_led 1
-#define Remote_led 2
-#define Spare1_led 3
-#define Spare2_led 4
-#define Deploy_led 5
 
 
 #define LED_Status_Can_Remote PA2
@@ -44,7 +35,19 @@
 uint8_t indexA = 0;  // index สำหรับซ้าย-ขวา (0-32)
 uint8_t indexB = 0;  // index สำหรับขึ้น-ลง (0-24)
 
-std::vector<String> joystickSequence;   // เก็บลำดับการเคลื่อนที่
+struct Movement {
+  unsigned long timestamp;
+  uint8_t msb;
+  uint8_t byte2;
+  uint8_t byte3;
+  uint8_t byte4;
+  uint8_t byte6;
+  uint8_t byte7;
+};
+
+std::vector<Movement> joystickSequence;
+
+
 bool enableJoystick = true;  // ตั้งค่าเป็น true เพื่อให้จอยสติ๊กทำงาน
 bool enableRemote = false;   // ตั้งค่าเป็น false เพื่อปิดการทำงานของรีโมท
 bool recording = false;                 // กำลังบันทึก?
@@ -59,6 +62,8 @@ bool deployed = false;  // สถานะการทำงานของร�
 bool stowed = true;    // สถานะการทำงานของรีโมท
 bool deployjoystick = false;  // สถานะการทำงานของรีโมท
 bool stowjoystick = true;    // สถานะการทำงานของรีโมท
+bool lastDeployStowButtonState_JOYSTICK = false;
+bool isDeployedByJoystick = false;  // ติดตามสถานะ deploy/stow
 
 
 int replayIndex = 0;                    // ตำแหน่งปัจจุบันของการเล่นซ้ำ
@@ -70,6 +75,8 @@ unsigned long valveMotorStartTime = 0;  // เวลาเริ่มหมุ�
 unsigned long previousTime = 0;         // เก็บเวลาล่าสุดที่บันทึก
 unsigned long previousTime2 = 0;        // เก็บเวลาล่าสุดที่บันทึก
 
+unsigned long lastDeployStowPressTime_JOYSTICK = 0;
+const unsigned long debounceDelay = 300; // หน่วงเวลา 300ms
 const unsigned long motorRunTime = 1000;  // มอเตอร์หมุน 1 วินาที
 unsigned long lastMovementTime = 0;     // เวลาเคลื่อนไหวล่าสุด
 const unsigned long idleTime = 125;      // เวลาที่ไม่มีการเคลื่อนไหว (2 วินาที)
@@ -211,10 +218,9 @@ void processJoystick(uint8_t msb, uint8_t byte2, uint8_t byte3, uint8_t byte4, u
   if (recording) {
     unsigned long currentTime = millis();
     if (currentTime - previousTime >= 50) {
-      previousTime = currentTime;  // อัปเดตเวลาล่าสุดที่บันทึก
-      String pwmData = String(byte2) + "," + String(byte4);
-      joystickSequence.push_back(String(currentTime) + "|" + movement + " PWM: " + pwmData);
-
+      previousTime = currentTime;
+      Movement move = { currentTime, msb, byte2, byte3, byte4, byte6, byte7 };
+      joystickSequence.push_back(move);
     }
   }
 
@@ -319,18 +325,6 @@ void Stow() {
     } 
   }
 
-void callbackCAN(uint16_t board, uint8_t byte, uint8_t data) {
-    if (byte >= 8) return; // ป้องกัน buffer overflow
-  
-    memset(CAN_TX_msg.buf, 0, sizeof(CAN_TX_msg.buf)); // Clear buffer
-  
-    CAN_TX_msg.id = board;
-    CAN_TX_msg.len = 8;
-    CAN_TX_msg.buf[byte] = data;
-  
-    Can.write(CAN_TX_msg);
-  }
-
 
 void loop()
 {
@@ -338,8 +332,6 @@ void loop()
 
   //////////////////joystick///////////////////////////////////////
   if (Can.read(CAN_RX_msg)) {
-    
-
      ///////////////////////////Teach//////////////////////////////////
     if (CAN_RX_msg.id == REMOTE_CAN_ID) {                  // CAN Recevier REMOTE
       unsigned long currentTime2 = millis();
@@ -432,7 +424,7 @@ void loop()
           Stow();  // เรียกฟังก์ชัน Stow
         }
 
-      }
+      
       // mySerial.println();
       // mySerial.print("  MSB    "); mySerial.print(msb);
       // mySerial.print("  Byte2  "); mySerial.print(byte2);
@@ -473,9 +465,10 @@ void loop()
         replayIndex = 0;
         lastReplayTime = millis();
         replayStartTime = millis();                                                                      // เก็บเวลาเริ่มเล่นซ้ำ
-        firstRecordedTime = joystickSequence[0].substring(0, joystickSequence[0].indexOf("|")).toInt();  // เวลาแรกสุดของการบันทึก
-      }
+        firstRecordedTime = joystickSequence[0].timestamp;
 
+      }
+     }
     }
 
 
@@ -502,114 +495,121 @@ void loop()
         } else if (!deployjoystick && stowjoystick) {
           Stow();  // เรียกฟังก์ชัน Stow
           stowjoystick = false;  // อัปเดตสถานะการทำงานของรีโมท
+        } 
+        if (isDeployedByJoystick && enableJoystick) {
+          processValveMotor(byte7 == 1);
+          processJoystick(msb, byte2, byte3, byte4, byte6, byte7);
         }
 
   }
 
 
             ///////////////////////////////////////////
-    if (CAN_RX_msg.id == SW_JOYSTICK_CAN_ID) {            // ปุ่มจาก joystick 6 ปุ่ม
-      uint8_t byteJT0 = CAN_RX_msg.buf[0];  // Teach
-      uint8_t byteJT1 = CAN_RX_msg.buf[1];  // On/Off Valve
-      uint8_t byteJT2 = CAN_RX_msg.buf[2];  // On/Off Remote
-      uint8_t byteJT3 = CAN_RX_msg.buf[3];  // Spare1
-      uint8_t byteJT4 = CAN_RX_msg.buf[4];  // Spare2
-      uint8_t byteJT5 = CAN_RX_msg.buf[5];  // Deploy/STOW
+            if (CAN_RX_msg.id == SW_JOYSTICK_CAN_ID) {            // ปุ่มจาก joystick 6 ปุ่ม
+              uint8_t byteJT0 = CAN_RX_msg.buf[0];  // Teach
+              uint8_t byteJT1 = CAN_RX_msg.buf[1];  // On/Off Valve
+              uint8_t byteJT2 = CAN_RX_msg.buf[2];  // On/Off Remote
+              uint8_t byteJT3 = CAN_RX_msg.buf[3];  // Spare1
+              uint8_t byteJT4 = CAN_RX_msg.buf[4];  // Spare2
+              uint8_t byteJT5 = CAN_RX_msg.buf[5];  // Deploy/STOW
+        
+              if (enableJoystick) {
+                bool currentDeployStow = (byteJT5 == 1);
+                unsigned long now = millis();
 
-      if (enableJoystick) {
-        if (byteJT5 == 1) {
-         deployjoystick = true;  // เรียกฟังก์ชัน Deploy
+                if (currentDeployStow && !lastDeployStowButtonState_JOYSTICK && (now - lastDeployStowPressTime_JOYSTICK > debounceDelay)) {
+                  // เพิ่งกดปุ่ม (edge detection + debounce)
+                  lastDeployStowPressTime_JOYSTICK = now;  // บันทึกเวลาล่าสุดที่กด
 
-        } else if (byteJT5 == 0) {
-         stowjoystick = true;  // เรียกฟังก์ชัน Deploy
-        }
-      }
-      // mySerial.println("SW_JOYSTICK_CAN_ID: " + String(byteJT0) + " " + String(byteJT1) + " " + String(byteJT2) + " " + String(byteJT3) + " " + String(byteJT4) + " " + String(byteJT5));
-
-
-      // ตรวจจับการกดปุ่มบันทึก/หยุดเล่นซ้ำ
-      if (byteJT0 == 1 && lastButtonState == false) {
-        if (replaying) {
-          mySerial.println("⏹ Stopping replay...");
-          Status_CAN_JOYSTICK = true;
-          replaying = false;
-          joystickSequence.clear();  // ล้างข้อมูลที่บันทึกไว้
-        } else {
-          mySerial.println("📌 Start Recording...");
-          // joystickSequence.clear();  // ล้างค่าที่บันทึกไว้
-          recording = true;
-        }
-        status_stop = 0;
-      }
-
-      lastButtonState = (byteJT0 == 1);  // อัปเดตสถานะปุ่มล่าสุด
-
-      // หยุดบันทึกและเริ่มเล่นซ้ำ
-      if (recording && byteJT0 == 0) {
-        mySerial.println("✅ Stop Recording. Start Replaying...");
-        recording = false;
-        replaying = true;
-        Status_CAN_JOYSTICK = true;
-        replayIndex = 0;
-        lastReplayTime = millis();
-        replayStartTime = millis();                                                                      // เก็บเวลาเริ่มเล่นซ้ำ
-        firstRecordedTime = joystickSequence[0].substring(0, joystickSequence[0].indexOf("|")).toInt();  // เวลาแรกสุดของการบันทึก
-      }
-    }
-
+                  if (!isDeployedByJoystick) {
+                    deployjoystick = true;
+                    isDeployedByJoystick = true;
+                    mySerial.println("🎮 [Joystick] Deploy");
+                  } else {
+                    stowjoystick = true;
+                    isDeployedByJoystick = false;
+                    mySerial.println("🎮 [Joystick] Stow");
+                  }
+                }
+                lastDeployStowButtonState_JOYSTICK = currentDeployStow;
+                if(isDeployedByJoystick){
+                  if (byteJT0 == 1 && lastButtonState == false) {
+                    if (replaying) {
+                      mySerial.println("⏹ Stopping replay...");
+                      Status_CAN_JOYSTICK = true;
+                      replaying = false;
+                      joystickSequence.clear();  // ล้างข้อมูลที่บันทึกไว้
+                    } else {
+                      mySerial.println("📌 Start Recording...");
+                      // joystickSequence.clear();  // ล้างค่าที่บันทึกไว้
+                      recording = true;
+                    }
+                    status_stop = 0;
+                  }
+        
+                  lastButtonState = (byteJT0 == 1);  // อัปเดตสถานะปุ่มล่าสุด
+        
+                  // หยุดบันทึกและเริ่มเล่นซ้ำ
+                  if (recording && byteJT0 == 0) {
+                    mySerial.println("✅ Stop Recording. Start Replaying...");
+                    recording = false;
+                    replaying = true;
+                    Status_CAN_JOYSTICK = true;
+                    replayIndex = 0;
+                    lastReplayTime = millis();
+                    replayStartTime = millis();                                                                      // เก็บเวลาเริ่มเล่นซ้ำ
+                    firstRecordedTime = joystickSequence[0].timestamp; // เวลาแรกสุดของการบันทึก
+                  }
+                }
+             }
+            }
+            if (joystickSequence.size() >= 500) {
+              mySerial.println("⚠️ บันทึกเต็มแล้ว");
+              recording = false;
+            }
+    
     // **เล่นซ้ำแบบไม่บล็อก**
     if (replaying && !joystickSequence.empty()) {
-      unsigned long currentReplayTime = millis() - replayStartTime;  // เวลาที่ผ่านไปตั้งแต่เริ่มเล่นซ้ำ
-      String command = joystickSequence[replayIndex];
+      unsigned long currentReplayTime = millis() - replayStartTime;
+      Movement current = joystickSequence[replayIndex];
+      unsigned long recordedTime = current.timestamp - firstRecordedTime;
 
-      // ดึง timestamp ของคำสั่งที่กำลังจะเล่น
-      int delimiterIndex = command.indexOf("|");
-      unsigned long recordedTime = command.substring(0, delimiterIndex).toInt();
-      recordedTime -= firstRecordedTime;  // ทำให้เริ่มที่ 0
-
-      // เล่นคำสั่งเมื่อถึงเวลาที่บันทึกไว้
       if (currentReplayTime >= recordedTime) {
-        String movement = command.substring(delimiterIndex + 1);  // ข้อมูลที่เหลือ
-        mySerial.println("Replaying: " + movement);
+        mySerial.println("Replaying...");
 
-        // แยก PWM
-        int pwm1 = movement.substring(movement.indexOf("PWM:") + 5, movement.indexOf(",")).toInt();
-        int pwm2 = movement.substring(movement.indexOf(",") + 1).toInt();
-
-        if (movement.indexOf("L") >= 0) {
+        // Motor 1 ซ้าย-ขวา
+        if (current.msb == 4 || current.msb == 132) {
           mySerial.println("Motor 1 Direction: Left");
           digitalWrite(MOTOR1_DIR_PIN, LOW);
-          analogWrite(MOTOR1_PWM_PIN, pwm1);  
-          if (indexA > 0) indexA-=1;  // ลด index (0-32)
+          analogWrite(MOTOR1_PWM_PIN, current.byte2);
+          if (indexA > 0) indexA--;
           updateCANIndicator();
-        } else if (movement.indexOf("R") >= 0) {
+        } else if (current.msb == 16 || current.msb == 144) {
           mySerial.println("Motor 1 Direction: Right");
           digitalWrite(MOTOR1_DIR_PIN, HIGH);
-          analogWrite(MOTOR1_PWM_PIN, pwm1);  
-          if (indexA < MAX_INDEX_A) indexA+=1;  // เพิ่ม index (0-32)
+          analogWrite(MOTOR1_PWM_PIN, current.byte2);
+          if (indexA < MAX_INDEX_A) indexA++;
           updateCANIndicator();
-
-        } else if (movement.indexOf("U") >= 0) {
+        }else if (current.byte3 == 16 || current.byte3 == 144) {
           mySerial.println("Motor 2 Direction: Up");
           digitalWrite(MOTOR2_DIR_PIN, HIGH);
-          analogWrite(MOTOR2_PWM_PIN, pwm2);  
-          if (indexB < MAX_INDEX_B) indexB+=1;  // เพิ่ม index (0-24)
+          analogWrite(MOTOR2_PWM_PIN, current.byte4);
+          if (indexB < MAX_INDEX_B) indexB++;
           updateCANIndicator();
-        } else if (movement.indexOf("D") >= 0) {
+        } else if (current.byte3 == 4 || current.byte3 == 132) {
           mySerial.println("Motor 2 Direction: Down");
           digitalWrite(MOTOR2_DIR_PIN, LOW);
-          analogWrite(MOTOR2_PWM_PIN, pwm2);  
-          if (indexB > 0) indexB-=1;  // ลด index (0-24)
+          analogWrite(MOTOR2_PWM_PIN, current.byte4);
+          if (indexB > 0) indexB--;
           updateCANIndicator();
         } else {
-          stopMotors();
+          stopMotors();  // หยุดมอเตอร์หากไม่มีการเคลื่อนไหว
         }
-        
 
         replayIndex++;
         if (replayIndex >= joystickSequence.size()) {
-          replayIndex = 0;             // วนซ้ำจากต้น
-          replayStartTime = millis();  // เริ่มต้นใหม่ทุกครั้งที่วน
+          replayIndex = 0;
+          replayStartTime = millis();
         }
       }
     }
@@ -627,7 +627,6 @@ void loop()
 
 
     if(Status_CAN_JOYSTICK && replaying){                             //  CAN Tansmitter  JOYSTICK callback
-      
       CAN_TX_msg.id = (0x122);
       CAN_TX_msg.len = 8;
       CAN_TX_msg.buf[0] =  1;   // Teach led
